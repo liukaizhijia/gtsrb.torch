@@ -56,6 +56,45 @@ end
 
 local Optim, parent = torch.class('nn.Optim')
 
+-- from torch/nn branch getParamsByDevice, this will allow to use the master branch
+-- of torch/nn.
+-- Run a callback (called with the module as an argument) in preorder over this
+-- module and its children. If flag_name is specified, we use it as an
+-- indicator to mark modules that have already been processed; if you call
+-- for_each again with the same flag_name, the processed modules (and all
+-- of their children) will be skipped.
+local function _for_each(module, callback, flag_name)
+    if flag_name and module[flag_name] then
+        return
+    end
+    callback(module)
+    if flag_name then
+        module[flag_name] = true
+    end
+    if not module.modules then
+        return
+    end
+    if module.gpu_assignments then
+        local current_gpuid = cutorch.getDevice()
+        for i, mod in ipairs(module.modules) do
+            cutorch.setDevice(module.gpu_assignments[i])
+            _for_each(mod, callback, flag_name)
+        end
+        cutorch.setDevice(current_gpuid)
+    else
+        for _, mod in ipairs(module.modules) do
+            _for_each(mod, callback, flag_name)
+        end
+    end
+end
+
+local function for_each(module, callback, flag_name)
+    if flag_name then
+        flag_name = '_for_each_' .. flag_name
+    end
+    _for_each(module, callback, flag_name)
+end
+
 
 -- Returns weight parameters and bias parameters and associated grad parameters
 -- for this module. Annotates the return values with flag marking parameter set
@@ -91,7 +130,7 @@ function Optim:__init(model, optState, checkpoint_data)
     -- each parameter tensor. self.modulesToOptState maps each module to
     -- a lua table of optState clones.
     if not checkpoint_data then
-        self.model:for_each(function(module)
+        for_each(self.model, function(module)
             self.modulesToOptState[module] = { }
             local params = self.weight_bias_parameters(module)
             -- expects either an empty table or 2 element table, one for weights
@@ -110,7 +149,7 @@ function Optim:__init(model, optState, checkpoint_data)
     else
         local state = checkpoint_data.optim_state
         local modules = {}
-        self.model:for_each(function(m) table.insert(modules, m) end)
+        for_each(self.model, function(m) table.insert(modules, m) end)
         assert(pl.tablex.compare_no_order(modules, pl.tablex.keys(state)))
         self.modulesToOptState = state
     end
@@ -136,7 +175,7 @@ local function _type_all(obj, t)
 end
 
 function Optim:type(t)
-    self.model:for_each(function(module)
+    for_each(self.model, function(module)
         local state= self.modulesToOptState[module]
         assert(state)
         _type_all(state, t)
